@@ -1,0 +1,426 @@
+﻿Confidential - Oracle Restricted 
+
+
+
+
+
+# main[a][b][c].tf
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 4.0" # Or your preferred version
+    }
+  }
+}
+
+
+provider "aws" {
+  region = "us-east-1" # Replace with your region
+}
+
+
+resource "aws_vpc" "main" {
+  cidr_block = "10.0.0.0/16"
+}
+
+
+resource "aws_subnet" "public" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.0.0/24"
+  map_public_ip_on_launch = true
+}
+
+
+resource "aws_instance" "app" {
+  ami           = "ami-xxxxxxxxxxxxxxxxx" # Replace with your AMI
+  instance_type = "t2.micro"
+  subnet_id     = aws_subnet.public.id
+
+
+  count = 3 # Create 3 application servers
+
+
+  provisioner "local-exec" {
+    command = "ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i 'localhost,' --extra-vars \"private_key=${file("./key.pem")}\" -u ubuntu -e \"host_ip=${self.public_ip}\" app_config.yml"
+  }
+}
+
+
+resource "aws_instance" "db" {
+  ami           = "ami-xxxxxxxxxxxxxxxxx" # Replace with your AMI
+  instance_type = "t2.micro"
+  subnet_id     = aws_subnet.public.id
+
+
+  count = 2 # Create 2 database servers
+}
+
+
+# Add load balancer resources here
+# main.tf
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 4.0"
+    }
+  }
+}
+
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+
+resource "aws_vpc" "main" {
+  cidr_block = "10.0.0.0/16"
+}
+
+
+resource "aws_subnet" "public" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.0.0/24"
+  map_public_ip_on_launch = true
+  availability_zone = "us-east-1a" # Specify AZ for ALB
+}
+
+
+resource "aws_internet_gateway" "gw" {
+  vpc_id = aws_vpc.main.id
+}
+
+
+resource "aws_route_table" "public_rt" {
+  vpc_id = aws_vpc.main.id
+
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.gw.id
+  }
+}
+
+
+resource "aws_route_table_association" "public_rta" {
+  subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public_rt.id
+}
+
+
+resource "aws_security_group" "allow_http" {
+  name        = "allow_http"
+  description = "Allow HTTP inbound traffic"
+  vpc_id      = aws_vpc.main.id
+
+
+  ingress {
+    description = "HTTP from anywhere"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+
+
+
+resource "aws_instance" "app" {
+  ami           = "ami-xxxxxxxxxxxxxxxxx" # Replace with your AMI
+  instance_type = "t2.micro"
+  subnet_id     = aws_subnet.public.id
+  vpc_security_group_ids = [aws_security_group.allow_http.id]
+  count = 3
+
+
+  provisioner "local-exec" {
+    command = "ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i '${self.private_ip},' --extra-vars \"private_key=${file("./key.pem")}\" -u ubuntu app_config.yml"
+  }
+}
+
+
+resource "aws_instance" "db" {
+  ami           = "ami-xxxxxxxxxxxxxxxxx" # Replace with your AMI
+  instance_type = "t2.micro"
+  subnet_id     = aws_subnet.public.id
+  vpc_security_group_ids = [aws_security_group.allow_http.id]
+
+
+  count = 2
+}
+
+
+resource "aws_lb_target_group" "app_tg" {
+  name     = "app-target-group"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.main.id
+
+
+  health_check {
+    path = "/"
+    protocol = "HTTP"
+    matcher = "200"
+    interval = 10
+    timeout = 5
+    healthy_threshold = 5
+    unhealthy_threshold = 2
+  }
+}
+
+
+resource "aws_lb" "app_lb" {
+  name               = "application-load-balancer"
+  internal           = false
+  load_balancer_type = "application"
+  subnets            = [aws_subnet.public.id]
+  security_groups = [aws_security_group.allow_http.id]
+}
+
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app_tg.arn
+  }
+}
+
+
+resource "aws_lb_target_group_attachment" "app_attachment" {
+  count = 3
+  target_group_arn = aws_lb_target_group.app_tg.arn
+  target_id        = aws_instance.app[count.index].id
+  port             = 80
+}
+
+
+
+
+Ansible
+# app_config.yml
+- hosts: all
+  become: true
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+
+    - name: Install web server (e.g., Nginx)
+      apt:
+        name: nginx
+        state: present
+
+
+    - name: Copy application files
+      copy:
+        src: ./app/
+        dest: /var/www/html/
+
+
+- hosts: tag:Name=db
+  become: true
+  tasks:
+    - name: Install database server (e.g., MySQL)
+      apt:
+        name: mysql-server
+        state: present
+
+
+    - name: Create database and user
+      mysql_db:
+        name: recommendation_db
+        state: present
+      delegate_to: localhost
+      run_once: true
+
+
+    - name: Create database user
+      mysql_user:
+        name: recommendation_user
+        password: password
+        priv: "*.*:ALL"
+        state: present
+      delegate_to: localhost
+      run_once: true
+
+
+    - name: Configure the application to connect to the database
+      template:
+        src: ./templates/app_config.j2
+        dest: /var/www/html/config.php
+      notify: restart webserver
+
+
+  handlers:
+    - name: restart webserver
+      service:
+        name: nginx
+        state: restarted
+
+
+
+
+Provisioning
+
+Terraform
+# main.tf
+
+
+# Define VPC and Subnets
+resource "aws_vpc" "ml_vpc" {
+  cidr_block = "10.0.0.0/16"
+}
+
+
+resource "aws_subnet" "ml_subnet" {
+  vpc_id     = aws_vpc.ml_vpc.id
+  cidr_block = "10.0.1.0/24"
+}
+
+
+# Create Security Group
+resource "aws_security_group" "ml_sg" {
+  name        = "ml_security_group"
+  description = "Security group for ML instances"
+  vpc_id      = aws_vpc.ml_vpc.id
+
+
+  # Allow incoming SSH for configuration
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]  # Replace with your IP range
+  }
+}
+
+
+# Provision EC2 Instances for Training
+resource "aws_instance" "ml_worker" {
+  count         = 3  # Number of worker instances
+  ami           = "ami-0c55b159cbfafe1f0"  # Example Deep Learning AMI
+  instance_type = "p3.8xlarge"             # GPU-powered instance type
+  subnet_id     = aws_subnet.ml_subnet.id
+  security_groups = [aws_security_group.ml_sg.id]
+
+
+  # Additional configurations can be added here, such as EBS volumes, IAM roles, etc.
+}
+
+
+* Topology definition (YAML Inventory File):
+
+
+YAML
+---
+groups:
+  spines:
+    platform: juniper_junos  # Assuming Juniper QFX5220 switches
+    hosts:
+      spine1:
+        hostname: 192.168.1.101
+        username: <username>
+        password: <password>
+      spine2:
+        hostname: 192.168.1.102
+        username: <username>
+        password: <password>
+      # ... (Add other spine switches)
+
+
+  leaves:
+    platform: juniper_junos
+    hosts:
+      leaf1:
+        hostname: 192.168.1.201
+        username: <username>
+        password: <password>
+      # ... (Add other leaf switches)
+
+
+  dgx_h100:
+    platform: linux  # Assuming Linux-based DGX H100 servers
+    hosts:
+      dgx1:
+        hostname: 192.168.1.301
+        username: <username>
+        password: <password>
+      # ... (Add other DGX H100 servers)
+
+
+  weka_storage:
+    platform: linux
+    hosts:
+      weka1:
+        hostname: 192.168.1.401
+        username: <username>
+        password: <password>
+      # ... (Add other Weka storage nodes)
+
+
+* Ansible Playbook (leveraging Netmiko, NAPALM, and Nornir):
+YAML
+---
+- name: Configure and Verify AI/ML Network
+  hosts: all
+  gather_facts: false  # We'll use NAPALM for facts
+  connection: local   # Run Nornir from the Ansible control node
+
+
+  tasks:
+    # 1. Connect to Devices and Gather Facts (Netmiko & NAPALM)
+    - name: Connect to devices and gather facts
+      nornir:
+        runner: threaded
+        tasks:
+          netmiko_connect:  
+            task: ansible.netcommon.net_connect
+          napalm_get:
+            getters: ['get_facts']
+
+
+    # 2. Apply Configurations (Jinja2 Templates & Netmiko)
+    - name: Apply configurations
+      nornir:
+        runner: threaded
+        tasks:
+          netmiko_configure:
+            template: 
+              - "templates/{{ ansible_network_os }}-{{ inventory_hostname }}.j2"
+
+
+    # 3. Verify Configuration with NAPALM
+    - name: Verify configuration
+      nornir:
+        runner: threaded
+        tasks:
+          napalm_validate:
+            src: "golden_configs/{{ ansible_network_os }}-{{ inventory_hostname }}.txt"
+            validation_source: "config"
+
+
+
+
+
+
+ Confidential - Oracle Restricted 
+
+[a]Please divide the code into 2 as its spans 5 pages and will reduce the readability of the chapter.
+[b]The code needs to be contiguous because the reader can just cut paste and use it as is. Dividing it into two may not be the best idea. Is there any other option of adding this code in the end with just the reference here?
+[c]Since we will be uploading the codes in our Github repository, you can include a snippet of the code here and add a note for the reader to access the entire code from this book’s GitHub repository. Let me know if this works.
